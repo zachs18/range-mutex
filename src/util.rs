@@ -1,5 +1,5 @@
 mod range;
-use std::{cell::UnsafeCell, ops::Range};
+use std::{cell::UnsafeCell, mem::ManuallyDrop, ops::Range};
 
 pub use range::range;
 
@@ -27,16 +27,23 @@ pub fn overlaps(r1: &Range<usize>, r2: &Range<usize>) -> bool {
 }
 
 pub fn wrap_unsafecell_vec<T>(vec: Vec<T>) -> Vec<UnsafeCell<T>> {
-    // SAFETY: A uniquely borrowed [T] can be interpreted as [UnsafeCell<T>],
+    // SAFETY: Owned `T`s can be interpreted as `UnsafeCell<T>`s,
     // since UnsafeCell<T> has the same in-memory representation as T,
-    // and the unique borrow ensures that "adding" interior mutability is not an issue.
-    // unsafe { &mut *(slice as *mut [T] as *mut [UnsafeCell<T>]) }
-    todo!()
+    // and the ownership ensures that "adding" interior mutability is not an issue.
+    let mut vec = ManuallyDrop::new(vec);
+    let length = vec.len();
+    let capacity = vec.capacity();
+    let ptr = vec.as_mut_ptr();
+    unsafe { Vec::from_raw_parts(ptr.cast(), length, capacity) }
 }
 
 pub fn unwrap_unsafecell_vec<T>(vec: Vec<UnsafeCell<T>>) -> Vec<T> {
-    // SAFETY: A uniquely borrowed [UnsafeCell<T>] can be interpreted as [T],
-    // since UnsafeCell<T> has the same in-memory representation as T.
-    // unsafe { &mut *(slice as *mut [UnsafeCell<T>] as *mut [T]) }
-    todo!()
+    // SAFETY: Owned `UnsafeCell<T>`s can be interpreted as `T`s,
+    // since UnsafeCell<T> has the same in-memory representation as T,
+    // and the ownership ensures that "adding" interior mutability is not an issue.
+    let mut vec = ManuallyDrop::new(vec);
+    let length = vec.len();
+    let capacity = vec.capacity();
+    let ptr = vec.as_mut_ptr();
+    unsafe { Vec::from_raw_parts(ptr.cast(), length, capacity) }
 }

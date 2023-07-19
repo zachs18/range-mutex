@@ -77,8 +77,8 @@ impl RangesUsed {
     }
 }
 
-pub unsafe trait RangeMutexBackingStorage<T>: AsMut<[T]> {
-    type AsUnsafeCell: AsMut<[UnsafeCell<T>]>;
+pub unsafe trait RangeMutexBackingStorage<T>: AsMut<[T]> + AsRef<[T]> {
+    type AsUnsafeCell: AsMut<[UnsafeCell<T>]> + AsRef<[UnsafeCell<T>]>;
     fn into_unsafecell(self) -> Self::AsUnsafeCell;
     fn from_unsafecell(value: Self::AsUnsafeCell) -> Self;
 }
@@ -119,17 +119,17 @@ unsafe impl<T> RangeMutexBackingStorage<T> for Vec<T> {
     }
 }
 
-pub struct RangeMutex<'a, T> {
-    data: &'a mut [UnsafeCell<T>],
+pub struct RangeMutex<T, B: RangeMutexBackingStorage<T>> {
+    data: B::AsUnsafeCell,
     used: Mutex<RangesUsed>,
 }
 
-unsafe impl<T: Send> Sync for RangeMutex<'_, T> {}
-unsafe impl<T: Send> Send for RangeMutex<'_, T> {}
+unsafe impl<T: Send, B: RangeMutexBackingStorage<T> + Sync> Sync for RangeMutex<T, B> {}
+unsafe impl<T: Send, B: RangeMutexBackingStorage<T> + Send> Send for RangeMutex<T, B> {}
 
-impl<'a, T> RangeMutex<'a, T> {
-    pub fn new(values: &'a mut [T]) -> Self {
-        let data = util::wrap_unsafecell_slice(values);
+impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
+    pub fn new(values: B) -> Self {
+        let data = B::into_unsafecell(values);
 
         Self {
             data,
@@ -138,7 +138,7 @@ impl<'a, T> RangeMutex<'a, T> {
     }
 
     pub fn get_mut(&mut self) -> &mut [T] {
-        util::unwrap_unsafecell_slice(&mut self.data)
+        util::unwrap_unsafecell_slice(self.data.as_mut())
     }
 
     pub fn undo_leak(&mut self) -> &mut [T] {
@@ -150,7 +150,7 @@ impl<'a, T> RangeMutex<'a, T> {
 
     pub fn try_lock(&self, range: impl RangeBounds<usize>) -> Option<RangeMutexGuard<'_, T>> {
         // panics if out of range
-        let range = util::range(self.data.len(), range);
+        let range = util::range(self.data.as_ref().len(), range);
         if range.len() == 0 {
             return Some(RangeMutexGuard {
                 data: NonNull::<[T; 0]>::dangling(),
@@ -163,7 +163,7 @@ impl<'a, T> RangeMutex<'a, T> {
         match used.lock_range(&range, false) {
             Err(_not_locked) => None,
             Ok(_locked) => {
-                let data = &self.data[range.clone()];
+                let data = &self.data.as_ref()[range.clone()];
                 let data = util::transpose_unsafecell_slice(data);
                 Some(RangeMutexGuard {
                     data: NonNull::new(data.get()).unwrap(),
@@ -176,7 +176,7 @@ impl<'a, T> RangeMutex<'a, T> {
 
     pub fn lock(&self, range: impl RangeBounds<usize>) -> RangeMutexGuard<'_, T> {
         // panics if out of range
-        let range = util::range(self.data.len(), range);
+        let range = util::range(self.data.as_ref().len(), range);
         if range.len() == 0 {
             return RangeMutexGuard {
                 data: NonNull::<[T; 0]>::dangling(),
@@ -193,7 +193,7 @@ impl<'a, T> RangeMutex<'a, T> {
                     used = Some(self.used.lock().unwrap());
                 }
                 Ok(_locked) => {
-                    let data = &self.data[range.clone()];
+                    let data = &self.data.as_ref()[range.clone()];
                     let data = util::transpose_unsafecell_slice(data);
                     return RangeMutexGuard {
                         data: NonNull::new(data.get()).unwrap(),

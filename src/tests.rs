@@ -5,7 +5,7 @@ use crate::RangeMutex;
 #[test]
 fn basic() {
     let mut data = vec![0u8; 300];
-    let mut mutex = RangeMutex::new(&mut data);
+    let mut mutex = RangeMutex::new(&mut data[..]);
     {
         let mut g1 = mutex.try_lock(..100).unwrap();
         let mut g2 = mutex.try_lock(100..200).unwrap();
@@ -38,7 +38,7 @@ fn basic() {
 #[test]
 fn basic_park() {
     let mut data = vec![0u8; 300];
-    let mut mutex = RangeMutex::new(&mut data);
+    let mut mutex = RangeMutex::new(&mut data[..]);
     // not perfect but meh
     let has_main_dropped_g1: AtomicBool = AtomicBool::new(false);
     let has_main_dropped_g2: AtomicBool = AtomicBool::new(false);
