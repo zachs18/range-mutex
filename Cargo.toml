@@ -2,7 +2,10 @@
 name = "range-mutex"
 version = "0.1.0"
 edition = "2021"
-
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
-
-[dependencies]
+authors = ["Zachary S"]
+description = "A `Mutex<[T]>`-like type, that allows locking different ranges separately."
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+categories = ["data-structures"]
+keywords = ["mutex"]
+repository = "https://github.com/zachs18/range-mutex"
