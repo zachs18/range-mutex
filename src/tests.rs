@@ -71,7 +71,8 @@ fn basic_park() {
             let g7 = mutex.lock(99..101);
             assert!(
                 has_main_dropped_g1.load(std::sync::atomic::Ordering::Acquire)
-                    && has_main_dropped_g2.load(std::sync::atomic::Ordering::Acquire),
+                    && has_main_dropped_g2
+                        .load(std::sync::atomic::Ordering::Acquire),
                 "overlaps with g1 and g2"
             );
             assert_eq!(&*g7, [1, 2]);
