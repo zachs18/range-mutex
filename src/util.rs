@@ -1,5 +1,5 @@
 mod range;
-use std::{cell::UnsafeCell, mem::ManuallyDrop, ops::Range};
+use std::{cell::UnsafeCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
 
 pub use range::range;
 
@@ -84,4 +84,26 @@ pub fn unwrap_unsafecell_vec<T>(vec: Vec<UnsafeCell<T>>) -> Vec<T> {
     let capacity = vec.capacity();
     let ptr = vec.as_mut_ptr();
     unsafe { Vec::from_raw_parts(ptr.cast(), length, capacity) }
+}
+
+/// # Safety:
+///
+/// See [`pointer::add`].
+///
+/// More precisely, `slice.as_ptr().add(mid)` must not be UB.
+pub unsafe fn split_slice_at<T>(
+    slice: NonNull<[T]>,
+    mid: usize,
+) -> (NonNull<[T]>, NonNull<[T]>) {
+    debug_assert!(mid <= slice.len());
+    let head_ptr = slice.as_ptr() as *mut T;
+    let head_len = mid;
+    let tail_ptr = head_ptr.add(mid);
+    let tail_len = slice.len() - mid;
+    (
+        NonNull::new(std::ptr::slice_from_raw_parts_mut(head_ptr, head_len))
+            .unwrap(),
+        NonNull::new(std::ptr::slice_from_raw_parts_mut(tail_ptr, tail_len))
+            .unwrap(),
+    )
 }

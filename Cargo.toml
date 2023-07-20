@@ -1,6 +1,6 @@
 [package]
 name = "range-mutex"
-version = "0.1.1"
+version = "0.1.2"
 edition = "2021"
 authors = ["Zachary S"]
 description = "A `Mutex<[T]>`-like type, that allows locking different ranges separately."
@@ -9,3 +9,6 @@ license = "MIT OR Apache-2.0"
 categories = ["data-structures"]
 keywords = ["mutex"]
 repository = "https://github.com/zachs18/range-mutex"
+
+[dependencies]
+parking_lot = "0.12.1"

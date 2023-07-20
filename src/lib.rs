@@ -1,10 +1,10 @@
+use parking_lot::Mutex;
 use std::{
     cell::UnsafeCell,
     cmp::Ordering,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut, Range, RangeBounds},
     ptr::NonNull,
-    sync::Mutex,
     thread::Thread,
 };
 
@@ -63,9 +63,9 @@ impl RangesUsed {
         }
     }
 
-    pub fn unlock_range(&mut self, range: &Range<usize>) {
-        let idx = self.overlapping_range_idx(&range).expect("range is locked");
-        debug_assert_eq!(&self.ranges[idx], range);
+    fn unlock_range(&mut self, range: &Range<usize>) {
+        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);
+        debug_assert_eq!(&self.ranges[idx], range, "range is locked");
         self.ranges.remove(idx);
         self.waiting.retain(|(thread, waiting_range)| {
             // TODO: more precise unpark selection
@@ -79,6 +79,20 @@ impl RangesUsed {
             !should_unpark_and_remove
         })
     }
+
+    fn split_locked_range(
+        &mut self,
+        range: &Range<usize>,
+        mid: usize,
+    ) -> (Range<usize>, Range<usize>) {
+        debug_assert!(range.len() <= mid);
+        let (head, tail) =
+            (range.start..range.start + mid, range.start + mid..range.end);
+        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);
+        debug_assert_eq!(&self.ranges[idx], range, "range is locked");
+        self.ranges.splice(idx..=idx, [head.clone(), tail.clone()]);
+        (head, tail)
+    }
 }
 
 /// The trait for types which can be used as the backing store for a
@@ -86,7 +100,8 @@ impl RangesUsed {
 ///
 /// # Safety:
 ///
-/// TODO
+/// * `AsUnsafeCell` must be `Send` and `Sync` if `T` is `Send`.
+/// * TODO
 pub unsafe trait RangeMutexBackingStorage<T>:
     AsMut<[T]> + AsRef<[T]>
 {
@@ -165,7 +180,7 @@ unsafe impl<'a, T> RangeMutexBackingStorage<T> for RangeMutexGuard<'a, T> {
         RangeMutexGuard {
             data: NonNull::new(this.data.as_ptr() as _).unwrap(),
             range: this.range.clone(),
-            lock: this.lock,
+            used: this.used,
         }
     }
 
@@ -174,7 +189,7 @@ unsafe impl<'a, T> RangeMutexBackingStorage<T> for RangeMutexGuard<'a, T> {
         RangeMutexGuard {
             data: NonNull::new(this.data.as_ptr() as _).unwrap(),
             range: this.range.clone(),
-            lock: this.lock,
+            used: this.used,
         }
     }
 }
@@ -193,8 +208,7 @@ unsafe impl<'a, T> RangeMutexBackingStorage<T> for RangeMutexGuard<'a, T> {
 ///
 /// const N: usize = 10;
 ///
-/// // Spawn a few threads to increment ranges of a shared vector (non-atomically), and
-/// // let the main thread know once all increments are done.
+/// // Spawn a few threads to increment ranges of a shared vector (non-atomically).
 /// let mut data = RangeMutex::new(vec![0; N + 1]);
 ///
 /// thread::scope(|scope| {
@@ -238,10 +252,16 @@ unsafe impl<T: Send, B: RangeMutexBackingStorage<T> + Send> Send
 }
 
 impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
+    /// Creates a new `RamgeMutex` in an unlocked state ready for use.
     pub fn new(values: B) -> Self {
         let data = B::into_unsafecell(values);
 
         Self { data, used: Mutex::new(RangesUsed::new()) }
+    }
+
+    /// Consumes this `RangeMutex`, returning the underlying data
+    pub fn into_inner(self) -> B {
+        B::from_unsafecell(self.data)
     }
 
     /// Returns a mutable reference to the underlying data.
@@ -260,7 +280,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     /// state tracking locks. This is relevant if some `RangeMutexGuard`s have
     /// been leaked.
     pub fn undo_leak(&mut self) -> &mut [T] {
-        let used = self.used.get_mut().unwrap();
+        let used = self.used.get_mut();
         used.ranges.clear();
         used.waiting.clear();
         self.get_mut()
@@ -285,13 +305,9 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
         // panics if out of range
         let range = util::range(self.data.as_ref().len(), range);
         if range.len() == 0 {
-            return Some(RangeMutexGuard {
-                data: NonNull::<[T; 0]>::dangling(),
-                range,
-                lock: &self.used,
-            });
+            return Some(RangeMutexGuard::empty());
         }
-        let mut used = self.used.lock().unwrap();
+        let mut used = self.used.lock();
 
         match used.lock_range(&range, false) {
             Err(_not_locked) => None,
@@ -301,7 +317,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                 Some(RangeMutexGuard {
                     data: NonNull::new(data.get()).unwrap(),
                     range,
-                    lock: &self.used,
+                    used: Some(&self.used),
                 })
             }
         }
@@ -364,19 +380,15 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
         // panics if out of range
         let range = util::range(self.data.as_ref().len(), range);
         if range.len() == 0 {
-            return RangeMutexGuard {
-                data: NonNull::<[T; 0]>::dangling(),
-                range,
-                lock: &self.used,
-            };
+            return RangeMutexGuard::empty();
         }
-        let mut used = Some(self.used.lock().unwrap());
+        let mut used = Some(self.used.lock());
         loop {
             match used.as_mut().unwrap().lock_range(&range, true) {
                 Err(_not_locked) => {
                     drop(used.take());
                     std::thread::park();
-                    used = Some(self.used.lock().unwrap());
+                    used = Some(self.used.lock());
                 }
                 Ok(_locked) => {
                     let data = &self.data.as_ref()[range.clone()];
@@ -384,7 +396,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                     return RangeMutexGuard {
                         data: NonNull::new(data.get()).unwrap(),
                         range,
-                        lock: &self.used,
+                        used: Some(&self.used),
                     };
                 }
             }
@@ -408,32 +420,74 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
 /// [`try_lock`][RangeMutex::try_lock] methods on [`RangeMutex`].
 pub struct RangeMutexGuard<'l, T> {
     data: NonNull<[T]>,
+    /// `range.len() == 0` if and only if `used.is_none()`
     range: Range<usize>,
-    lock: &'l Mutex<RangesUsed>,
+    used: Option<&'l Mutex<RangesUsed>>,
+}
+
+unsafe impl<T: Send> Send for RangeMutexGuard<'_, T> {}
+unsafe impl<T: Sync> Sync for RangeMutexGuard<'_, T> {}
+
+impl<T> Default for RangeMutexGuard<'_, T> {
+    fn default() -> Self {
+        Self::empty()
+    }
+}
+
+impl<'l, T> RangeMutexGuard<'l, T> {
+    pub fn empty() -> Self {
+        Self { data: NonNull::<[T; 0]>::dangling(), range: 0..0, used: None }
+    }
+
+    pub fn split_at(this: Self, mid: usize) -> (Self, Self) {
+        assert!(mid <= this.len());
+        if mid == 0 {
+            return (Self::empty(), this);
+        } else if mid == this.len() {
+            return (this, Self::empty());
+        }
+        let this = ManuallyDrop::new(this);
+        let mut used = this.used.as_ref().expect("this.len() > 0").lock();
+        let (head, tail) = used.split_locked_range(&this.range, mid);
+        // SAFETY: `mid <= this.len()`, so `this.data.add(mid)` is defined.
+        let (head_data, tail_data) =
+            unsafe { util::split_slice_at(this.data, mid) };
+        (
+            Self { data: head_data, range: head, used: this.used },
+            Self { data: tail_data, range: tail, used: this.used },
+        )
+    }
 }
 
 impl<T> Deref for RangeMutexGuard<'_, T> {
     type Target = [T];
 
     fn deref(&self) -> &Self::Target {
+        // SAFETY: self.data is uniquely accessible to this RangeMutexGuard, so
+        // it is sound to dereference it shared-ly from &self. (Or it is empty
+        // and dangling and thus sound to dereference.)
         unsafe { self.data.as_ref() }
     }
 }
 
 impl<T> DerefMut for RangeMutexGuard<'_, T> {
     fn deref_mut(&mut self) -> &mut Self::Target {
+        // SAFETY: self.data is uniquely accessible to this RangeMutexGuard, so
+        // it is sound to dereference it mutably from &mut self. (Or it is empty
+        // and dangling and thus sound to dereference.)
         unsafe { self.data.as_mut() }
     }
 }
 
 impl<'l, T> Drop for RangeMutexGuard<'l, T> {
     fn drop(&mut self) {
-        if self.range.len() == 0 {
-            // Nothing to unlock
-            return;
+        if let Some(used) = self.used {
+            let mut used = used.lock();
+            used.unlock_range(&self.range);
+        } else {
+            // `range.len() == 0` if and only if `used.is_none()`
+            debug_assert_eq!(self.range.len(), 0)
         }
-        let mut used = self.lock.lock().unwrap();
-        used.unlock_range(&self.range);
     }
 }
 
