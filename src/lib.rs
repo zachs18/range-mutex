@@ -1,4 +1,6 @@
 use parking_lot::Mutex;
+#[cfg(feature = "async")]
+use std::task::{Poll, Waker};
 use std::{
     cell::UnsafeCell,
     cmp::Ordering,
@@ -12,11 +14,30 @@ use std::{
 mod tests;
 mod util;
 
+enum Waiter {
+    Thread(Thread),
+    #[cfg(feature = "async")]
+    Task(Waker),
+}
+
+impl Waiter {
+    fn unpark(&self) {
+        match self {
+            Waiter::Thread(thread) => thread.unpark(),
+            #[cfg(feature = "async")]
+            Waiter::Task(waker) => waker.wake_by_ref(),
+        }
+    }
+}
+
 #[derive(Default)]
 struct RangesUsed {
     ranges: Vec<Range<usize>>,
-    waiting: Vec<(Thread, Range<usize>)>,
+    waiting: Vec<(Waiter, Range<usize>)>,
 }
+
+struct Locked;
+struct NotLocked;
 
 impl RangesUsed {
     const fn new() -> Self {
@@ -43,22 +64,23 @@ impl RangesUsed {
         })
     }
 
+    /// If `make_waiter` is `None`, no waiter will be inserted.
     fn lock_range(
         &mut self,
         range: &Range<usize>,
-        add_waiter_if_not_locked: bool,
-    ) -> Result<(), ()> {
+        make_waiter: Option<impl FnOnce() -> Waiter>,
+    ) -> Result<Locked, NotLocked> {
         let idx = self.overlapping_range_idx(&range);
         match idx {
             Ok(_overlapping_range_idx) => {
-                if add_waiter_if_not_locked {
-                    self.waiting.push((std::thread::current(), range.clone()));
+                if let Some(waiter) = make_waiter {
+                    self.waiting.push((waiter(), range.clone()));
                 }
-                Err(())
+                Err(NotLocked)
             }
             Err(insert_idx) => {
                 self.ranges.insert(insert_idx, range.clone());
-                Ok(())
+                Ok(Locked)
             }
         }
     }
@@ -67,13 +89,13 @@ impl RangesUsed {
         let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);
         debug_assert_eq!(&self.ranges[idx], range, "range is locked");
         self.ranges.remove(idx);
-        self.waiting.retain(|(thread, waiting_range)| {
+        self.waiting.retain(|(unparker, waiting_range)| {
             // TODO: more precise unpark selection
             // e.g. don't unpark two overlapping waiters,
             // don't unpark a waiter that overlaps with another existing lock.
             let should_unpark_and_remove = util::overlaps(range, waiting_range);
             if should_unpark_and_remove {
-                thread.unpark();
+                unparker.unpark();
             }
             // return value is should *not* remove
             !should_unpark_and_remove
@@ -309,9 +331,9 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
         }
         let mut used = self.used.lock();
 
-        match used.lock_range(&range, false) {
-            Err(_not_locked) => None,
-            Ok(_locked) => {
+        match used.lock_range(&range, None::<fn() -> Waiter>) {
+            Err(NotLocked) => None,
+            Ok(Locked) => {
                 let data = &self.data.as_ref()[range.clone()];
                 let data = util::transpose_unsafecell_slice(data);
                 Some(RangeMutexGuard {
@@ -342,13 +364,21 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     /// ascending or descending order consistently.
     ///
     /// ```rust,ignore
+    /// # use range_mutex::RangeMutex;
+    /// # let mutex = RangeMutex::new(vec![0; 8]);
+    /// # std::thread::scope(|scope| {
+    /// #  scope.spawn(|| {
     /// // Thread 1:
     /// let _g1 = mutex.lock(0..=2);
     /// let _g2 = mutex.lock(3..=5); // Thread 1 may deadlock here if thread 1 holds 0..=2 and thread 2 holds 4..=7.
+    /// #  });
     ///
+    /// #  scope.spawn(|| {
     /// // Thread 2:
     /// let _g1 = mutex.lock(4..=7);
     /// let _g2 = mutex.lock(0..=3); // Thread 2 may deadlock here if thread 1 holds 0..=2 and thread 2 holds 4..=7.
+    /// #  });
+    /// # });
     /// ```
     ///
     /// ```rust
@@ -382,15 +412,19 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
         if range.len() == 0 {
             return RangeMutexGuard::empty();
         }
-        let mut used = Some(self.used.lock());
+        let mut used = self.used.lock();
         loop {
-            match used.as_mut().unwrap().lock_range(&range, true) {
-                Err(_not_locked) => {
-                    drop(used.take());
+            match used.lock_range(
+                &range,
+                Some(|| Waiter::Thread(std::thread::current())),
+            ) {
+                Err(NotLocked) => {
+                    // Don't hold the mutex while parked
+                    drop(used);
                     std::thread::park();
-                    used = Some(self.used.lock());
+                    used = self.used.lock();
                 }
-                Ok(_locked) => {
+                Ok(Locked) => {
                     let data = &self.data.as_ref()[range.clone()];
                     let data = util::transpose_unsafecell_slice(data);
                     return RangeMutexGuard {
@@ -401,6 +435,60 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                 }
             }
         }
+    }
+
+    /// Asynchronously acquires a lock for a range of this slice, blocking the
+    /// current task until it is able to do so.
+    ///
+    /// This function will block the local task until it is available to
+    /// acquire the lock. Upon returning, the task is the only task with
+    /// the lock held for the given range. An RAII guard is returned to allow
+    /// scoped unlock of the lock. When the guard goes out of scope, the
+    /// lock will be unlocked.
+    ///
+    /// The exact behavior on locking a range in a task which already holds
+    /// a lock on an overlapping range is left unspecified. However, this
+    /// function will not return on the second call (it might panic or
+    /// deadlock, for example).
+    ///
+    /// Mutual attempts between mutiple tasks to lock overlapping ranges may
+    /// result in a deadlock. To avoid this, have all tasks lock ranges in
+    /// ascending or descending order consistently.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if the end
+    /// point is greater than the length of the slice.
+    #[cfg(feature = "async")]
+    pub async fn lock_async(
+        &self,
+        range: impl RangeBounds<usize>,
+    ) -> RangeMutexGuard<'_, T> {
+        // panics if out of range
+        let range = util::range(self.data.as_ref().len(), range);
+        std::future::poll_fn(move |ctx| {
+            if range.len() == 0 {
+                return Poll::Ready(RangeMutexGuard::empty());
+            }
+            // Don't hold the mutex while waiting, only hold during the poll
+            // call.
+            let mut used = self.used.lock();
+            match used
+                .lock_range(&range, Some(|| Waiter::Task(ctx.waker().clone())))
+            {
+                Err(NotLocked) => Poll::Pending,
+                Ok(Locked) => {
+                    let data = &self.data.as_ref()[range.clone()];
+                    let data = util::transpose_unsafecell_slice(data);
+                    std::task::Poll::Ready(RangeMutexGuard {
+                        data: NonNull::new(data.get()).unwrap(),
+                        range: range.clone(),
+                        used: Some(&self.used),
+                    })
+                }
+            }
+        })
+        .await
     }
 
     /// Returns the number of elements in the slice.
@@ -435,10 +523,20 @@ impl<T> Default for RangeMutexGuard<'_, T> {
 }
 
 impl<'l, T> RangeMutexGuard<'l, T> {
+    /// A `RangeMutexGuard` pointing to an empty slice.
     pub fn empty() -> Self {
         Self { data: NonNull::<[T; 0]>::dangling(), range: 0..0, used: None }
     }
 
+    /// Divide this `RangeMutexGuard` into two at an index.
+    ///
+    /// The first will contain all indices from `[0, mid)`, (excluding the index
+    /// `mid` itself) and the second will contain all indices from `[mid, len)`
+    /// (excluding the index `len` itself).
+    ///
+    /// # Panics
+    ///
+    /// Panics if `mid > len`.
     pub fn split_at(this: Self, mid: usize) -> (Self, Self) {
         assert!(mid <= this.len());
         if mid == 0 {
@@ -448,14 +546,30 @@ impl<'l, T> RangeMutexGuard<'l, T> {
         }
         let this = ManuallyDrop::new(this);
         let mut used = this.used.as_ref().expect("this.len() > 0").lock();
-        let (head, tail) = used.split_locked_range(&this.range, mid);
         // SAFETY: `mid <= this.len()`, so `this.data.add(mid)` is defined.
         let (head_data, tail_data) =
             unsafe { util::split_slice_at(this.data, mid) };
+        let (head, tail) = used.split_locked_range(&this.range, mid);
         (
             Self { data: head_data, range: head, used: this.used },
             Self { data: tail_data, range: tail, used: this.used },
         )
+    }
+
+    /// Reduce the extent of this `RangeMutexGuard` to a subrange. Elements
+    /// outside of `self[range]` are unlocked, and a guard for `self[range]` is
+    /// returned.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the starting point is greater than the end point or if the end
+    /// point is greater than the length of the slice.
+    pub fn slice(this: Self, range: impl RangeBounds<usize>) -> Self {
+        // TODO: make more efficient
+        let range = util::range(this.len(), range);
+        let (this, _tail) = Self::split_at(this, range.end);
+        let (_head, this) = Self::split_at(this, range.start);
+        this
     }
 }
 
