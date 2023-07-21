@@ -254,3 +254,17 @@ async fn async_lock() {
         );
     }
 }
+
+/// ```rust,compile_error,E0597
+/// use range_mutex::RangeMutex;
+/// let data: RangeMutex<&'static str, Vec<&'static str>> =
+///     RangeMutex::new(vec!["Hello, world!"]);
+/// {
+///     let s = String::from("Oh, no!");
+///     let mut g = data.lock(..);
+///     // s does not live long enough
+///     g[0] = &s;
+/// }
+/// dbg!(data.into_inner());
+/// ```
+pub struct AssertVarianceIsCorrect;

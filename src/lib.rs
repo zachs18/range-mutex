@@ -4,13 +4,14 @@ use std::task::{Poll, Waker};
 use std::{
     cell::UnsafeCell,
     cmp::Ordering,
+    marker::PhantomData,
     mem::ManuallyDrop,
     ops::{Deref, DerefMut, Range, RangeBounds},
     ptr::NonNull,
     thread::Thread,
 };
 
-#[cfg(test)]
+#[cfg(any(test, doctest))]
 mod tests;
 mod util;
 
@@ -203,6 +204,7 @@ unsafe impl<'a, T> RangeMutexBackingStorage<T> for RangeMutexGuard<'a, T> {
             data: NonNull::new(this.data.as_ptr() as _).unwrap(),
             range: this.range.clone(),
             used: this.used,
+            _variance: PhantomData,
         }
     }
 
@@ -212,6 +214,7 @@ unsafe impl<'a, T> RangeMutexBackingStorage<T> for RangeMutexGuard<'a, T> {
             data: NonNull::new(this.data.as_ptr() as _).unwrap(),
             range: this.range.clone(),
             used: this.used,
+            _variance: PhantomData,
         }
     }
 }
@@ -340,6 +343,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                     data: NonNull::new(data.get()).unwrap(),
                     range,
                     used: Some(&self.used),
+                    _variance: PhantomData,
                 })
             }
         }
@@ -431,6 +435,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                         data: NonNull::new(data.get()).unwrap(),
                         range,
                         used: Some(&self.used),
+                        _variance: PhantomData,
                     };
                 }
             }
@@ -484,6 +489,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                         data: NonNull::new(data.get()).unwrap(),
                         range: range.clone(),
                         used: Some(&self.used),
+                        _variance: PhantomData,
                     })
                 }
             }
@@ -508,6 +514,8 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
 /// [`try_lock`][RangeMutex::try_lock] methods on [`RangeMutex`].
 pub struct RangeMutexGuard<'l, T> {
     data: NonNull<[T]>,
+    /// RangeMutexGuard<'l, T> should be covariant in 'l, but invariant in T.
+    _variance: PhantomData<&'l mut [T]>,
     /// `range.len() == 0` if and only if `used.is_none()`
     range: Range<usize>,
     used: Option<&'l Mutex<RangesUsed>>,
@@ -525,7 +533,12 @@ impl<T> Default for RangeMutexGuard<'_, T> {
 impl<'l, T> RangeMutexGuard<'l, T> {
     /// A `RangeMutexGuard` pointing to an empty slice.
     pub fn empty() -> Self {
-        Self { data: NonNull::<[T; 0]>::dangling(), range: 0..0, used: None }
+        Self {
+            data: NonNull::<[T; 0]>::dangling(),
+            range: 0..0,
+            used: None,
+            _variance: PhantomData,
+        }
     }
 
     /// Divide this `RangeMutexGuard` into two at an index.
@@ -551,8 +564,18 @@ impl<'l, T> RangeMutexGuard<'l, T> {
             unsafe { util::split_slice_at(this.data, mid) };
         let (head, tail) = used.split_locked_range(&this.range, mid);
         (
-            Self { data: head_data, range: head, used: this.used },
-            Self { data: tail_data, range: tail, used: this.used },
+            Self {
+                data: head_data,
+                range: head,
+                used: this.used,
+                _variance: PhantomData,
+            },
+            Self {
+                data: tail_data,
+                range: tail,
+                used: this.used,
+                _variance: PhantomData,
+            },
         )
     }
 
