@@ -33,6 +33,13 @@ impl Waiter {
 
 #[derive(Default)]
 struct RangesUsed {
+    /// Invariants:
+    /// * For each range: `range.len() > 0`
+    /// * For each adjacent pair of ranges: `r0.end <= r1.start` (i.e. ranges
+    ///   are sorted and do not overlap)
+    ///
+    /// This allows performing a binary-search on this vec for overlapping
+    /// ranges.
     ranges: Vec<Range<usize>>,
     waiting: Vec<(Waiter, Range<usize>)>,
 }
@@ -485,7 +492,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
                 Ok(Locked) => {
                     let data = &self.data.as_ref()[range.clone()];
                     let data = util::transpose_unsafecell_slice(data);
-                    std::task::Poll::Ready(RangeMutexGuard {
+                    Poll::Ready(RangeMutexGuard {
                         data: NonNull::new(data.get()).unwrap(),
                         range: range.clone(),
                         used: Some(&self.used),

@@ -255,7 +255,7 @@ async fn async_lock() {
     }
 }
 
-/// ```rust,compile_error,E0597
+/// ```rust,compile_fail,E0597
 /// use range_mutex::RangeMutex;
 /// let data: RangeMutex<&'static str, Vec<&'static str>> =
 ///     RangeMutex::new(vec!["Hello, world!"]);

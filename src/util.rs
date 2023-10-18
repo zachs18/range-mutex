@@ -32,7 +32,7 @@ pub fn wrap_unsafecell_array<T, const N: usize>(
 pub fn unwrap_unsafecell_array<T, const N: usize>(
     array: [UnsafeCell<T>; N],
 ) -> [T; N] {
-    // SAFETY: A uniquely borrowed [UnsafeCell<T>; N] can be interpreted as [T;
+    // SAFETY: An owned [UnsafeCell<T>; N] can be interpreted as [T;
     // N], since UnsafeCell<T> has the same in-memory representation as T,
     // and the ownership ensures that "removing" interior mutability is not an
     // issue.
