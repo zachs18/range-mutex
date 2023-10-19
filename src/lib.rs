@@ -115,7 +115,7 @@ impl RangesUsed {
         range: &Range<usize>,
         mid: usize,
     ) -> (Range<usize>, Range<usize>) {
-        debug_assert!(range.len() <= mid);
+        debug_assert!(mid <= range.len());
         let (head, tail) =
             (range.start..range.start + mid, range.start + mid..range.end);
         let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);

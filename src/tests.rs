@@ -1,4 +1,4 @@
-use std::{sync::atomic::AtomicBool, time::Duration};
+use std::{ops::Bound, sync::atomic::AtomicBool, time::Duration};
 
 use itertools::Itertools;
 
@@ -206,6 +206,16 @@ fn overlapping_with_sleep() {
     }
 }
 
+#[test]
+fn split() {
+    let mut values = [0u8; 64];
+    let mutex = RangeMutex::new(&mut values);
+
+    let guard = mutex.try_lock(..).unwrap();
+    assert_eq!(guard.len(), 64);
+    let (_g1, _g2) = RangeMutexGuard::split_at(guard, 42);
+}
+
 #[cfg(feature = "async")]
 #[tokio::test(start_paused = true)]
 async fn async_lock() {
@@ -268,3 +278,38 @@ async fn async_lock() {
 /// dbg!(data.into_inner());
 /// ```
 pub struct AssertVarianceIsCorrect;
+
+#[test]
+#[should_panic]
+fn ridiculous_range_1() {
+    let mut values = [(); usize::MAX];
+    let range_mutex = RangeMutex::new(&mut values);
+
+    let _ = range_mutex.lock(..=usize::MAX);
+}
+
+#[test]
+#[should_panic]
+fn ridiculous_range_2() {
+    let mut values = [(); usize::MAX];
+    let range_mutex = RangeMutex::new(&mut values);
+
+    let _ = range_mutex.lock((Bound::Excluded(usize::MAX), Bound::Unbounded));
+}
+
+#[test]
+#[should_panic]
+fn out_of_range_1() {
+    let range_mutex = RangeMutex::new(&mut [(); 0]);
+
+    let _ = range_mutex.lock(..1);
+}
+
+#[test]
+#[should_panic]
+fn out_of_range_2() {
+    let mut values = [0u8; 4];
+    let range_mutex = RangeMutex::new(&mut values);
+
+    let _ = range_mutex.lock(2..1);
+}
