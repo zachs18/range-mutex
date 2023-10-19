@@ -213,7 +213,37 @@ fn split() {
 
     let guard = mutex.try_lock(..).unwrap();
     assert_eq!(guard.len(), 64);
-    let (_g1, _g2) = RangeMutexGuard::split_at(guard, 42);
+    let (g1, g2) = RangeMutexGuard::split_at(guard, 42);
+    assert_eq!(g1.len(), 42);
+    assert_eq!(g2.len(), 64 - 42);
+    drop((g1, g2));
+
+    let guard = mutex.try_lock(..).unwrap();
+    assert_eq!(guard.len(), 64);
+    let (g1, g2) = RangeMutexGuard::split_at(guard, 64);
+    assert_eq!(g1.len(), 64);
+    assert_eq!(g2.len(), 0);
+    drop((g1, g2));
+
+    let guard = mutex.try_lock(..).unwrap();
+    assert_eq!(guard.len(), 64);
+    let (g1, g2) = RangeMutexGuard::split_at(guard, 0);
+    assert_eq!(g1.len(), 0);
+    assert_eq!(g2.len(), 64);
+    drop((g1, g2));
+}
+
+#[test]
+fn slice() {
+    let mut values = [0u8; 64];
+    let mutex = RangeMutex::new(&mut values);
+
+    let guard = mutex.try_lock(..).unwrap();
+    assert_eq!(guard.len(), 64);
+    let guard = RangeMutexGuard::slice(guard, 12..42);
+    assert_eq!(guard.len(), 42 - 12);
+    assert!(mutex.try_lock(..12).is_some());
+    assert!(mutex.try_lock(42..).is_some());
 }
 
 #[cfg(feature = "async")]
@@ -277,6 +307,7 @@ async fn async_lock() {
 /// }
 /// dbg!(data.into_inner());
 /// ```
+#[allow(dead_code)]
 pub struct AssertVarianceIsCorrect;
 
 #[test]
@@ -312,4 +343,94 @@ fn out_of_range_2() {
     let range_mutex = RangeMutex::new(&mut values);
 
     let _ = range_mutex.lock(2..1);
+}
+
+#[test]
+fn into_inner_coverage() {
+    // Array
+    let range_mutex = RangeMutex::new([0u8; 42]);
+    range_mutex.lock(..).fill(42);
+    assert_eq!(range_mutex.into_inner(), [42; 42]);
+
+    // &mut Array
+    let mut values = [0u8; 42];
+    let range_mutex = RangeMutex::new(&mut values);
+    range_mutex.lock(..).fill(42);
+    assert_eq!(range_mutex.into_inner(), &mut [42; 42]);
+
+    // &mut Slice
+    let mut values = [0u8; 42];
+    let range_mutex = RangeMutex::new(&mut values[..]);
+    range_mutex.lock(..).fill(42);
+    assert_eq!(range_mutex.into_inner(), &mut [42; 42]);
+
+    // Vec
+    let range_mutex = RangeMutex::new(vec![0u8; 42]);
+    range_mutex.lock(..).fill(42);
+    assert_eq!(range_mutex.into_inner(), [42; 42]);
+
+    // Boxed slice
+    let range_mutex = RangeMutex::new(vec![0u8; 42].into_boxed_slice());
+    range_mutex.lock(..).fill(42);
+    assert_eq!(*range_mutex.into_inner(), [42; 42]);
+
+    // RangeMutexGuard
+    let range_mutex = RangeMutex::new(vec![0u8; 42].into_boxed_slice());
+    {
+        let range_mutex = RangeMutex::new(range_mutex.lock(..));
+        range_mutex.lock(..).fill(42);
+        assert_eq!(*range_mutex.into_inner(), [42; 42]);
+    }
+    assert_eq!(*range_mutex.into_inner(), [42; 42]);
+}
+
+#[test]
+fn leak() {
+    let mut values = [0; 64];
+    let mut range_mutex = RangeMutex::new(&mut values);
+    let mut g1 = range_mutex.lock(..32);
+    g1.fill(42);
+    std::mem::forget(g1);
+    assert!(range_mutex.try_lock(..).is_none());
+    assert!(range_mutex.try_lock(32..).is_some());
+    assert_eq!(range_mutex.get_mut()[..32], [42; 32]);
+    assert_eq!(range_mutex.get_mut()[32..], [0; 32]);
+    assert!(range_mutex.try_lock(..).is_none());
+    assert!(range_mutex.try_lock(32..).is_some());
+    range_mutex.undo_leak();
+    assert!(range_mutex.try_lock(..).is_some());
+    assert!(range_mutex.try_lock(32..).is_some());
+}
+
+#[test]
+fn zero_length() {
+    let mut values = [0; 64];
+    let range_mutex = RangeMutex::new(&mut values);
+    let _g1 = range_mutex.lock(..32);
+    assert_eq!(range_mutex.try_lock(..0).unwrap().len(), 0);
+    assert_eq!(range_mutex.lock(..0).len(), 0);
+    assert_eq!(range_mutex.try_lock(10..10).unwrap().len(), 0);
+    assert_eq!(range_mutex.lock(10..10).len(), 0);
+}
+
+#[cfg(feature = "async")]
+#[tokio::test(start_paused = true)]
+async fn async_zero_length() {
+    let mut values = [0; 64];
+    let range_mutex = RangeMutex::new(&mut values);
+    let _g1 = range_mutex.lock_async(..32).await;
+    assert_eq!(range_mutex.try_lock(..0).unwrap().len(), 0);
+    assert_eq!(range_mutex.lock_async(..0).await.len(), 0);
+    assert_eq!(range_mutex.try_lock(10..10).unwrap().len(), 0);
+    assert_eq!(range_mutex.lock_async(10..10).await.len(), 0);
+}
+
+#[test]
+fn as_ref() {
+    let mut values = [0; 64];
+    let range_mutex = RangeMutex::new(&mut values);
+    let mut guard = range_mutex.lock(..);
+    guard.fill(42);
+    assert_eq!(guard.as_ref(), &[42; 64]);
+    assert_eq!(guard.as_mut(), &mut [42; 64]);
 }

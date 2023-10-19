@@ -1,6 +1,6 @@
 [package]
 name = "range-mutex"
-version = "0.1.5"
+version = "0.1.6"
 edition = "2021"
 authors = ["Zachary S"]
 description = "A `Mutex<[T]>`-like type, that allows locking different ranges separately."
