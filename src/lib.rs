@@ -509,6 +509,11 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     pub fn len(&self) -> usize {
         self.data.as_ref().len()
     }
+
+    /// Returns `true` if the slice has a length of 0.
+    pub fn is_empty(&self) -> bool {
+        self.data.as_ref().len() == 0
+    }
 }
 
 /// An RAII implementation of a “scoped lock” of a slice of a [`RangeMutex`].
