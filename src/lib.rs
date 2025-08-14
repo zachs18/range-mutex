@@ -1,3 +1,4 @@
+#![deny(unsafe_op_in_unsafe_fn)]
 use parking_lot::Mutex;
 #[cfg(feature = "async")]
 use std::task::{Poll, Waker};
@@ -57,7 +58,7 @@ impl RangesUsed {
         range: &Range<usize>,
     ) -> Result<usize, usize> {
         debug_assert!(
-            range.len() > 0,
+            !range.is_empty(),
             "empty ranges should be handled already"
         );
         self.ranges.binary_search_by(|locked_range| {
@@ -78,7 +79,7 @@ impl RangesUsed {
         range: &Range<usize>,
         make_waiter: Option<impl FnOnce() -> Waiter>,
     ) -> Result<Locked, NotLocked> {
-        let idx = self.overlapping_range_idx(&range);
+        let idx = self.overlapping_range_idx(range);
         match idx {
             Ok(_overlapping_range_idx) => {
                 if let Some(waiter) = make_waiter {
@@ -94,7 +95,7 @@ impl RangesUsed {
     }
 
     fn unlock_range(&mut self, range: &Range<usize>) {
-        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);
+        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(range);
         debug_assert_eq!(&self.ranges[idx], range, "range is locked");
         self.ranges.remove(idx);
         self.waiting.retain(|(unparker, waiting_range)| {
@@ -118,7 +119,7 @@ impl RangesUsed {
         debug_assert!(mid <= range.len());
         let (head, tail) =
             (range.start..range.start + mid, range.start + mid..range.end);
-        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(&range);
+        let (Ok(idx) | Err(idx)) = self.overlapping_range_idx(range);
         debug_assert_eq!(&self.ranges[idx], range, "range is locked");
         self.ranges.splice(idx..=idx, [head.clone(), tail.clone()]);
         (head, tail)
@@ -336,7 +337,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     ) -> Option<RangeMutexGuard<'_, T>> {
         // panics if out of range
         let range = util::range(self.data.as_ref().len(), range);
-        if range.len() == 0 {
+        if range.is_empty() {
             return Some(RangeMutexGuard::empty());
         }
         let mut used = self.used.lock();
@@ -420,7 +421,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     ) -> RangeMutexGuard<'_, T> {
         // panics if out of range
         let range = util::range(self.data.as_ref().len(), range);
-        if range.len() == 0 {
+        if range.is_empty() {
             return RangeMutexGuard::empty();
         }
         let mut used = self.used.lock();
@@ -479,7 +480,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
         // panics if out of range
         let range = util::range(self.data.as_ref().len(), range);
         std::future::poll_fn(move |ctx| {
-            if range.len() == 0 {
+            if range.is_empty() {
                 return Poll::Ready(RangeMutexGuard::empty());
             }
             // Don't hold the mutex while waiting, only hold during the poll
@@ -523,7 +524,7 @@ pub struct RangeMutexGuard<'l, T> {
     data: NonNull<[T]>,
     /// RangeMutexGuard<'l, T> should be covariant in 'l, but invariant in T.
     _variance: PhantomData<&'l mut [T]>,
-    /// `range.len() == 0` if and only if `used.is_none()`
+    /// `range..is_empty()` if and only if `used.is_none()`
     range: Range<usize>,
     used: Option<&'l Mutex<RangesUsed>>,
 }
@@ -629,7 +630,7 @@ impl<'l, T> Drop for RangeMutexGuard<'l, T> {
             let mut used = used.lock();
             used.unlock_range(&self.range);
         } else {
-            // `range.len() == 0` if and only if `used.is_none()`
+            // `range.is_empty()` if and only if `used.is_none()`
             debug_assert_eq!(self.range.len(), 0)
         }
     }

@@ -3,9 +3,9 @@ use std::{cell::UnsafeCell, mem::ManuallyDrop, ops::Range, ptr::NonNull};
 
 pub use range::range;
 
-pub fn transpose_unsafecell_slice<'a, T>(
-    slice: &'a [UnsafeCell<T>],
-) -> &'a UnsafeCell<[T]> {
+pub fn transpose_unsafecell_slice<T>(
+    slice: &[UnsafeCell<T>],
+) -> &UnsafeCell<[T]> {
     // SAFETY: [UnsafeCell<T>] has the same in-memory representation as
     // UnsafeCell<[T]>.
     unsafe { &*(slice as *const [UnsafeCell<T>] as *const UnsafeCell<[T]>) }
@@ -42,9 +42,9 @@ pub fn unwrap_unsafecell_array<T, const N: usize>(
     }
 }
 
-pub fn wrap_unsafecell_slice<'a, T>(
-    slice: &'a mut [T],
-) -> &'a mut [UnsafeCell<T>] {
+pub fn wrap_unsafecell_slice<T>(
+    slice: &mut [T],
+) -> &mut [UnsafeCell<T>] {
     // SAFETY: A uniquely borrowed [T] can be interpreted as [UnsafeCell<T>],
     // since UnsafeCell<T> has the same in-memory representation as T,
     // and the unique borrow ensures that "adding" interior mutability is not an
@@ -52,9 +52,9 @@ pub fn wrap_unsafecell_slice<'a, T>(
     unsafe { &mut *(slice as *mut [T] as *mut [UnsafeCell<T>]) }
 }
 
-pub fn unwrap_unsafecell_slice<'a, T>(
-    slice: &'a mut [UnsafeCell<T>],
-) -> &'a mut [T] {
+pub fn unwrap_unsafecell_slice<T>(
+    slice: &mut [UnsafeCell<T>],
+) -> &mut [T] {
     // SAFETY: A uniquely borrowed [UnsafeCell<T>] can be interpreted as [T],
     // since UnsafeCell<T> has the same in-memory representation as T,
     // and the unique borrow ensures that "removing" interior mutability is not
@@ -98,7 +98,8 @@ pub unsafe fn split_slice_at<T>(
     debug_assert!(mid <= slice.len());
     let head_ptr = slice.as_ptr() as *mut T;
     let head_len = mid;
-    let tail_ptr = head_ptr.add(mid);
+    // SAFETY: discharged to caller
+    let tail_ptr = unsafe { head_ptr.add(mid) };
     let tail_len = slice.len() - mid;
     (
         NonNull::new(std::ptr::slice_from_raw_parts_mut(head_ptr, head_len))
