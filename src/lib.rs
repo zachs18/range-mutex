@@ -1,7 +1,10 @@
 #![deny(unsafe_op_in_unsafe_fn)]
 use parking_lot::Mutex;
 #[cfg(feature = "async")]
-use std::task::{Poll, Waker};
+use std::{
+    future::Future,
+    task::{Poll, Waker},
+};
 use std::{
     cell::UnsafeCell,
     cmp::Ordering,
@@ -331,15 +334,27 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     ///
     /// Panics if the starting point is greater than the end point or if the end
     /// point is greater than the length of the slice.
+    #[inline]
     pub fn try_lock(
         &self,
         range: impl RangeBounds<usize>,
     ) -> Option<RangeMutexGuard<'_, T>> {
         // panics if out of range
-        let range = util::range(self.data.as_ref().len(), range);
+        let range = util::range(self.len(), range);
         if range.is_empty() {
             return Some(RangeMutexGuard::empty());
         }
+        // SAFETY: util::range panics on invalid ranges, and range is not empty
+        unsafe { self.outlined_try_lock(range) }
+    }
+
+    /// Safety:
+    /// * `range` is non-empty
+    /// * `range.start <= range.end`
+    /// * `range.end <= self.len()`
+    unsafe fn outlined_try_lock(&self, range: Range<usize>) -> Option<RangeMutexGuard<'_, T>> {
+        debug_assert!(!range.is_empty() && range.start <= range.end && range.end <= self.len());
+
         let mut used = self.used.lock();
 
         match used.lock_range(&range, None::<fn() -> Waiter>) {
@@ -415,15 +430,27 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     ///
     /// Panics if the starting point is greater than the end point or if the end
     /// point is greater than the length of the slice.
+    #[inline]
     pub fn lock(
         &self,
         range: impl RangeBounds<usize>,
     ) -> RangeMutexGuard<'_, T> {
         // panics if out of range
-        let range = util::range(self.data.as_ref().len(), range);
+        let range = util::range(self.len(), range);
         if range.is_empty() {
             return RangeMutexGuard::empty();
         }
+        // SAFETY: util::range panics on invalid ranges, and range is not empty
+        unsafe { self.outlined_lock(range) }
+    }
+
+    /// Safety:
+    /// * `range` is non-empty
+    /// * `range.start <= range.end`
+    /// * `range.end <= self.len()`
+    unsafe fn outlined_lock(&self, range: Range<usize>) -> RangeMutexGuard<'_, T> {
+        debug_assert!(!range.is_empty() && range.start <= range.end && range.end <= self.len());
+
         let mut used = self.used.lock();
         loop {
             match used.lock_range(
@@ -473,12 +500,27 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     /// Panics if the starting point is greater than the end point or if the end
     /// point is greater than the length of the slice.
     #[cfg(feature = "async")]
-    pub async fn lock_async(
+    #[inline]
+    pub fn lock_async(
         &self,
         range: impl RangeBounds<usize>,
+    ) -> impl Future<Output = RangeMutexGuard<'_, T>> {
+        let range = util::range(self.len(), range);
+        // SAFETY: util::range panics on invalid ranges
+        unsafe { self.outlined_lock_async(range) }
+    }
+
+    /// Safety:
+    /// * `range.start <= range.end`
+    /// * `range.end <= self.len()`
+    ///
+    /// `range` *can* be empty
+    #[cfg(feature = "async")]
+    async unsafe fn outlined_lock_async(
+        &self,
+        range: Range<usize>,
     ) -> RangeMutexGuard<'_, T> {
-        // panics if out of range
-        let range = util::range(self.data.as_ref().len(), range);
+        debug_assert!(range.start <= range.end && range.end <= self.len());
         std::future::poll_fn(move |ctx| {
             if range.is_empty() {
                 return Poll::Ready(RangeMutexGuard::empty());
