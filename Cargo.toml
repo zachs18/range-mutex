@@ -9,6 +9,7 @@ license = "MIT OR Apache-2.0"
 categories = ["data-structures"]
 keywords = ["mutex"]
 repository = "https://github.com/zachs18/range-mutex"
+rust-version = "1.64.0"
 
 [dependencies]
 parking_lot = "0.12.1"
