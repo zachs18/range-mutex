@@ -132,10 +132,12 @@ impl RangesUsed {
 /// The trait for types which can be used as the backing store for a
 /// [`RangeMutex`].
 ///
-/// # Safety:
+/// # Safety
 ///
-/// * `AsUnsafeCell` must be `Send` and `Sync` if `T` is `Send`.
-/// * TODO
+/// * `AsUnsafeCell` must be safe to send and share between threads if `T` is `Send`
+///   (it does not need to implement `Send` or `Sync`)
+/// * `Self` and `AsUnsafeCell`'s `AsRef::as_ref` and `AsMut::as_mut` implementations must be
+///   "well-behaved", similar to [`std::ops::DerefPure`]
 pub unsafe trait RangeMutexBackingStorage<T>:
     AsMut<[T]> + AsRef<[T]>
 {
@@ -311,7 +313,7 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     /// Undo the effect of leaked guards on the borrow state of the
     /// `RangeMutex`.
     ///
-    /// This call is similar to [`get_mut`] but more specialized. It borrows
+    /// This call is similar to [`get_mut`](Self::get_mut) but more specialized. It borrows
     /// `RangeMutex` mutably to ensure no locks exist and then resets the
     /// state tracking locks. This is relevant if some `RangeMutexGuard`s have
     /// been leaked.
@@ -493,7 +495,8 @@ impl<T, B: RangeMutexBackingStorage<T>> RangeMutex<T, B> {
     ///
     /// Mutual attempts between mutiple tasks to lock overlapping ranges may
     /// result in a deadlock. To avoid this, have all tasks lock ranges in
-    /// ascending or descending order consistently.
+    /// ascending or descending order consistently. See [`lock`](Self::lock)
+    /// for examples of this.
     ///
     /// # Panics
     ///
